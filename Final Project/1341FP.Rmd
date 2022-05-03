@@ -1,0 +1,302 @@
+---
+title: "1341 Final Project"
+author: "Andrew Windsheimer"
+date: "12/10/2021"
+output: word_document
+---
+```{r, cache=T}
+#Import data
+############################
+scores <- read.csv("nhl_scores.csv")
+
+scores[scores=="Chicago Blackhawks"] <- "Chicago Black Hawks"
+scores[scores=="Dallas Stars"] <- "Minnesota North Stars"
+scores[scores=="Carolina Hurricanes"] <- "Hartford Whalers"
+scores[scores=="Colorado Avalanche"] <- "Quebec Nordiques"
+scores[scores=="Arizona Coyotes"] <- "Winnipeg Jets"
+
+names(scores)[[1]] <- "id"
+
+pre_season <- scores[scores$year<=1982 | (scores$year==1983 & scores$month<10),]
+season_schedule <- scores[(scores$year==1983 & scores$month>=10)|(scores$year==1984 & scores$month<=4 & scores$game_type=="r"),]
+
+team_info <- read.csv("nhl_initial_elos.csv")
+
+names(team_info)[[1]] <- names(season_schedule)[[1]] <- "team"
+############################
+
+# Obtain list of unique conference names and unique division names
+conferences = na.omit(unique(team_info$conference))
+divisions = na.omit(unique(team_info$division))
+
+weight = 7.4
+hfa = 55.7522039863812
+
+# Determine preseason ELOs
+############################
+# Iterate through all games in the sport's history up to season being simulated
+for(i in 1:nrow(pre_season)) {
+  # Find indices corresponding to home and away teams for current game
+  home_index = which(team_info$team == pre_season$home_team[i])
+  away_index = which(team_info$team == pre_season$away_team[i])
+
+  # Find home and away team Elo ratings
+  home_elo = team_info$rating[home_index]
+  away_elo = team_info$rating[away_index]
+
+  # Calculate home team win probability
+  win_prob = 1 / (10^((away_elo - (home_elo + hfa*pre_season$neutral[i]))/400) + 1)
+
+  # Calculate actual margin of victory - must be positive
+  score_diff = abs(pre_season$home_score[i] - pre_season$away_score[i])
+
+  # Determine home team result
+  if(pre_season$home_score[i] > pre_season$away_score[i]) {
+    home_result = 1  # Home team wins
+  } else if(pre_season$home_score[i] < pre_season$away_score[i]) {
+    home_result = 0  # Home team loses
+  } else {
+    home_result = 0.5  # Tie
+  }
+
+  # Calculate amount each team's Elo rating is adjusted by
+  home_elo_adjustment = weight * log(score_diff + 1) * (home_result - win_prob)
+
+  # Adjust Elo ratings - add point to winner and subtract points from loser
+  team_info$rating[home_index] = team_info$rating[home_index] + home_elo_adjustment
+  team_info$rating[away_index] = team_info$rating[away_index] - home_elo_adjustment
+
+  # Adjust Elo ratings at end of season to regress 1/3 of the way towards 1500
+  if(i < nrow(scores) && scores$season[i+1] > scores$season[i]) {
+    for(j in 1:nrow(team_info)) {
+      if(scores$season[i] >= team_info$inaugural_season[j]) {
+        team_info$rating[j] = team_info$rating[j] - (team_info$rating[j] - 1500)/3
+      }
+    }
+
+    # Identify all teams that existed at beginning of following season
+    existing_teams = team_info[which(team_info$inaugural_season <= (scores$season[i] + 1)),]
+
+    # Calculate amount each team's Elo rating must be adjusted by to make mean 1500
+    expansion_adjustment = -1*(mean(existing_teams$rating) - 1500)
+
+    # Perform expansion adjustment on teams that existed at beginning of following season
+    for(j in 1:nrow(team_info)) {
+      if((scores$season[i] + 1) >= team_info$inaugural_season[j]) {
+        team_info$rating[j] = team_info$rating[j] + expansion_adjustment
+      }
+    }
+  }
+}
+############################
+
+#Run season simulations
+set.seed(99)
+# Specify season to simulate
+iterations = 10000
+
+team_info = team_info[which(team_info$conference != 'NA'),]
+summary = data.frame(matrix(0, ncol = 8, nrow = nrow(team_info)))
+colnames(summary) = c("team", "average_points", "playoffs", "division_titles", "div_semi_winner", "div_final_champ", "conference_championships", "championships")
+summary$team = team_info$team
+
+histories = data.frame(matrix(0, ncol = nrow(team_info), nrow = iterations))
+colnames(histories) = team_info$team
+
+team_info[,c("team", "rating")]
+
+for(i in 1:iterations) {
+  season_stats = team_info[,which(colnames(team_info) != "inaugural_season")]
+  season_stats$points = 0
+  season_stats$rand = runif(nrow(team_info))
+  
+  for(j in 1:nrow(season_schedule)) {
+    # Find indices corresponding to home and away teams for current game
+    home_index = which(season_stats$team == season_schedule$home_team[j])
+    away_index = which(season_stats$team == season_schedule$away_team[j])
+  
+    # Find home and away team Elo ratings
+    home_elo = season_stats$rating[home_index]
+    away_elo = season_stats$rating[away_index]
+
+    # Calculate home team win and tie probabilities
+    tie_prob = (1/(sqrt(4*pi))) * exp(-((away_elo - (home_elo + hfa*season_schedule$neutral[j]))^2/160000))
+    win_prob = 1 / (10^((away_elo - (home_elo + hfa*season_schedule$neutral[j]))/400) + 1) - 0.50*tie_prob
+    u = runif(1)
+    
+    if(u < win_prob + 0.4375*tie_prob) {  # Home team wins in regulation/OT
+      season_stats$points[home_index] = season_stats$points[home_index] + 2
+    } else if(u > win_prob + .5625*tie_prob) {  # Away team wins in regulation/OT
+      season_stats$points[away_index] = season_stats$points[away_index] + 2
+    } else { # Tie after overtime: assumption is 12.5% chance
+      season_stats$points[home_index] = season_stats$points[home_index] + 1
+      season_stats$points[away_index] = season_stats$points[away_index] + 1
+    }
+
+    # Calculate actual margin of victory - must be positive
+    score_diff = abs(season_schedule$home_score[j] - season_schedule$away_score[j])   
+  
+    # Determine home team result
+    if(season_schedule$home_score[j] > season_schedule$away_score[j]) { 
+      home_result = 1  # Home team wins
+    } else if(season_schedule$home_score[j] < season_schedule$away_score[j]) { 
+      home_result = 0  # Home team loses
+    } else { 
+      home_result = 0.5  # Tie
+    }
+    
+    # Calculate amount each team's Elo rating is adjusted by
+    home_elo_adjustment = weight * log(score_diff + 1) * (home_result - win_prob)
+  
+    # Adjust Elo ratings after game has been simulated to get team's new strength
+    season_stats$rating[home_index] = season_stats$rating[home_index] + home_elo_adjustment
+    season_stats$rating[away_index] = season_stats$rating[away_index] - home_elo_adjustment
+  }
+  
+  summary$average_points = summary$average_points + season_stats$points
+  
+  #No wild cards needed in 1983-84 format: the top four teams are taken from each division, then played in 1 vs 4, 2 vs 3 format. 
+  
+  division_winners = data.frame(matrix(ncol = 6, nrow = 0))
+  colnames(division_winners) = c("team", "conference", "division", "rating", "points", "rand")
+
+  non_division_winners = data.frame(matrix(ncol = 6, nrow = 0))
+  colnames(non_division_winners) = c("team", "conference", "division", "rating", "points", "rand")
+
+  for(div in divisions) {
+    div_standings = season_stats[which(season_stats$division == div),]
+    div_standings = div_standings[order(-div_standings$points, -div_standings$rand),]
+    division_winners = rbind(division_winners, div_standings[1:4,])
+    non_division_winners = rbind(non_division_winners, div_standings[5:nrow(div_standings),])
+  }
+  
+  division_winners = division_winners[order(division_winners$conference, division_winners$division, -division_winners$points, -division_winners$rand),]
+  
+  for(j in 1:nrow(division_winners)) {
+    index = which(season_stats$team == division_winners$team[j])
+    summary$playoffs[index] = summary$playoffs[index] + 1
+    if(j %% 4 == 1) {  # Only increment division winners by 1 in division titles
+      summary$division_titles[index] = summary$division_titles[index] + 1
+    }
+  }
+
+  #First round was five games, the rest were seven
+  games_per_round = c(5, 7, 7, 7)
+  
+  playoff_bracket = data.frame(matrix(-Inf, ncol = 6, nrow = 16))
+  colnames(playoff_bracket) = c("team", "conference", "division", "rating", "points", "rand")
+  next_round = NULL
+  
+  playoff_bracket$division[4] = playoff_bracket$division[3]
+  playoff_bracket$division[8] = playoff_bracket$division[7]
+  playoff_bracket$division[12] = playoff_bracket$division[11]
+  playoff_bracket$division[16] = playoff_bracket$division[15]
+  
+  playoff_bracket = division_winners
+
+  playoff_bracket$seed = rep(1:4,4)
+
+  # Divisional rounds
+  for(round in 1:2) {
+    for(j in 1:4) {
+      for(k in 1:(nrow(playoff_bracket)/8)) {
+        high_seed_index = 0.25*nrow(playoff_bracket)*j-(0.25*nrow(playoff_bracket)-k)
+        low_seed_index = 0.25*nrow(playoff_bracket)*j-(k-1)
+        high_seed_elo = playoff_bracket$rating[high_seed_index]
+        low_seed_elo = playoff_bracket$rating[low_seed_index]
+        high_seed_home_win_prob = 1 / (10^((low_seed_elo - (high_seed_elo + hfa))/400) + 1)
+        low_seed_home_win_prob = 1 / (10^((high_seed_elo - (low_seed_elo + hfa))/400) + 1)
+        win_probs = c(rep(high_seed_home_win_prob, ceiling(games_per_round[round]/2)), 1-rep(low_seed_home_win_prob, floor(games_per_round[round]/2)))
+        u = runif(games_per_round[round])
+        high_seed_wins = sum(u < win_probs)/games_per_round[round]
+    
+        if(high_seed_wins > 0.50) {
+          next_round = rbind(next_round, playoff_bracket[high_seed_index,])
+        } else{
+          next_round = rbind(next_round, playoff_bracket[low_seed_index,])
+        }
+      }
+    }
+    
+    playoff_bracket = next_round
+    playoff_bracket = playoff_bracket[order(playoff_bracket$division, playoff_bracket$seed),]
+    
+    if(round==1) {
+      for(team in playoff_bracket$team) {
+        index = which(season_stats$team == team)
+        summary$div_semi_finalist[index] = summary$div_semi_finalist[index] + 1
+      }
+    } else {
+      for(team in playoff_bracket$team) {
+        index = which(season_stats$team == team)
+        summary$div_finalist[index] = summary$div_finalist[index] + 1
+      }
+    }
+    
+    #peek into seasons where the pens made the division finals
+    # if(!identical(which(playoff_bracket$team=="Pittsburgh Penguins"), integer(0))){
+    #   print(division_winners)
+    # }
+    
+    next_round = NULL
+  }
+  
+  
+  # Conference championships
+  playoff_bracket = playoff_bracket[order(playoff_bracket$conference, playoff_bracket$seed, -playoff_bracket$points, -playoff_bracket$rand),]
+
+  for(j in 1:2) {
+    high_seed_index = 2*j-1
+    low_seed_index = 2*j
+    high_seed_elo = playoff_bracket$rating[high_seed_index]
+    low_seed_elo = playoff_bracket$rating[low_seed_index]
+    high_seed_home_win_prob = 1 / (10^((low_seed_elo - (high_seed_elo + hfa))/400) + 1)
+    low_seed_home_win_prob = 1 / (10^((high_seed_elo - (low_seed_elo + hfa))/400) + 1)
+    win_probs = c(rep(high_seed_home_win_prob, ceiling(games_per_round[length(games_per_round)]/2)), 1-rep(low_seed_home_win_prob, floor(games_per_round[length(games_per_round)]/2)))
+    u = runif(games_per_round[3])
+    high_seed_wins = sum(u < win_probs)/games_per_round[3]
+    
+    if(high_seed_wins > 0.50) {
+      next_round = rbind(next_round, playoff_bracket[high_seed_index,])
+    } else{
+      next_round = rbind(next_round, playoff_bracket[low_seed_index,])
+    }
+  }
+  
+  playoff_bracket = next_round
+  playoff_bracket = playoff_bracket[order(playoff_bracket$division, playoff_bracket$seed),]
+  next_round = NULL
+  
+  # Stanley Cup Finals
+  playoff_bracket = playoff_bracket[order(-playoff_bracket$points, -playoff_bracket$rand),]
+  
+  high_seed_elo = playoff_bracket$rating[1]
+  low_seed_elo = playoff_bracket$rating[2]
+  high_seed_home_win_prob = 1 / (10^((low_seed_elo - (high_seed_elo + hfa))/400) + 1)
+  low_seed_home_win_prob = 1 / (10^((high_seed_elo - (low_seed_elo + hfa))/400) + 1)
+  win_probs = c(rep(high_seed_home_win_prob, ceiling(games_per_round[length(games_per_round)]/2)), 1-rep(low_seed_home_win_prob, floor(games_per_round[length(games_per_round)]/2)))
+  u = runif(games_per_round[4])
+  high_seed_wins = sum(u < win_probs)/games_per_round[4]
+    
+  if(high_seed_wins > 0.50) {
+    champion = playoff_bracket[1,]
+  } else{
+    champion = playoff_bracket[2,]
+  }
+
+  for(team in playoff_bracket$team) {
+    index = which(season_stats$team == team)
+    summary$conference_championships[index] = summary$conference_championships[index] + 1
+  }
+  
+  index = which(season_stats$team == champion$team)
+  summary$championships[index] = summary$championships[index] + 1
+  histories[i,] = season_stats$points
+}
+
+summary$average_points = summary$average_points/iterations
+summary$actual_points = team_info$points
+summary$resid = summary$actual_points - summary$average_points
+
+summary
+```
